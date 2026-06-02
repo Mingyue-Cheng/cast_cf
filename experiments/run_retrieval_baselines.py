@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from castcf.features import standardize_by_reference
+from castcf.learned_metric import LearnedMetricScorer, learned_metric_search
 from castcf.metrics import query_nfd_at_k, subset_metric_table
 from castcf.retrieval import (
     aggregate_neighbor_futures,
@@ -157,6 +158,50 @@ def run_baselines_from_config(config: dict[str, Any]) -> dict[str, int | str]:
         temperature=temperature,
     )
 
+    method_reports = {
+        "recent": _method_report(query, y_query, recent_pred, subset_columns),
+        "shape_knn": _method_report(query, y_query, shape_pred, subset_columns, y_memory, shape_neighbors),
+        "context_knn": _method_report(query, y_query, context_pred, subset_columns, y_memory, context_neighbors),
+        "castcf_lite": _method_report(query, y_query, castcf_pred, subset_columns, y_memory, castcf_neighbors),
+        "castcf_multiroute": _method_report(
+            query,
+            y_query,
+            multiroute_pred,
+            subset_columns,
+            y_memory,
+            multiroute_neighbors,
+        ),
+    }
+
+    learned_model_path = retrieval_cfg.get("learned_model_path")
+    if learned_model_path and Path(learned_model_path).exists():
+        learned_scorer = LearnedMetricScorer.load(learned_model_path)
+        learned_neighbors, learned_scores = learned_metric_search(
+            x_query_retrieval,
+            ctx_query_retrieval,
+            meta_query_retrieval,
+            x_memory_retrieval,
+            ctx_memory_retrieval,
+            meta_memory_retrieval,
+            learned_scorer,
+            k=k,
+            route_k=route_k,
+        )
+        learned_pred = aggregate_neighbor_futures(
+            y_memory,
+            learned_neighbors,
+            learned_scores,
+            temperature=temperature,
+        )
+        method_reports["learned_metric"] = _method_report(
+            query,
+            y_query,
+            learned_pred,
+            subset_columns,
+            y_memory,
+            learned_neighbors,
+        )
+
     metrics = {
         "cases_path": str(cases_path),
         "memory_cases": int(len(memory)),
@@ -170,21 +215,9 @@ def run_baselines_from_config(config: dict[str, Any]) -> dict[str, int | str]:
             "shape_weight": float(retrieval_cfg.get("shape_weight", 0.4)),
             "context_weight": float(retrieval_cfg.get("context_weight", 0.5)),
             "meta_weight": float(retrieval_cfg.get("meta_weight", 0.1)),
+            "learned_model_path": str(learned_model_path) if learned_model_path else None,
         },
-        "methods": {
-            "recent": _method_report(query, y_query, recent_pred, subset_columns),
-            "shape_knn": _method_report(query, y_query, shape_pred, subset_columns, y_memory, shape_neighbors),
-            "context_knn": _method_report(query, y_query, context_pred, subset_columns, y_memory, context_neighbors),
-            "castcf_lite": _method_report(query, y_query, castcf_pred, subset_columns, y_memory, castcf_neighbors),
-            "castcf_multiroute": _method_report(
-                query,
-                y_query,
-                multiroute_pred,
-                subset_columns,
-                y_memory,
-                multiroute_neighbors,
-            ),
-        },
+        "methods": method_reports,
     }
 
     metrics_path = Path(data_cfg["metrics_path"])
