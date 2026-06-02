@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Local dataset and generated experiment outputs.
+FreshRetailNet-50K/
+artifacts/
+

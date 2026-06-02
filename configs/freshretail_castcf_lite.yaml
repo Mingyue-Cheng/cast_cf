@@ -1,0 +1,25 @@
+data:
+  data_dir: FreshRetailNet-50K/data
+  cases_path: artifacts/freshretail_cases_sample.parquet
+  metrics_path: artifacts/freshretail_castcf_lite_metrics.json
+  max_series: 500
+  seed: 42
+  lookback_days: 28
+  horizon_days: 7
+  stride_days: 7
+  subset_columns:
+    - future_discounted
+    - future_holiday
+    - future_activity
+    - past_stockout
+    - future_stockout
+
+retrieval:
+  k: 10
+  candidate_k: 100
+  route_k: 100
+  temperature: 0.2
+  standardize_features: true
+  shape_weight: 0.35
+  context_weight: 0.55
+  meta_weight: 0.10
