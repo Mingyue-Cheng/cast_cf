@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from castcf.data import case_overlap_exclusion_mask
 from castcf.features import standardize_by_reference
 from castcf.learned_metric import LearnedMetricScorer, multiroute_candidate_indices, pair_feature_matrix
 from castcf.training_pairs import build_future_utility_pairs
@@ -30,15 +31,13 @@ def _combined_context(rows: pd.DataFrame) -> np.ndarray:
 def _standardized_memory_features(
     x_memory: np.ndarray,
     ctx_memory: np.ndarray,
-    meta_memory: np.ndarray,
     enabled: bool,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     if not enabled:
-        return x_memory, ctx_memory, meta_memory
+        return x_memory, ctx_memory
     x_retrieval, _ = standardize_by_reference(x_memory, x_memory)
     ctx_retrieval, _ = standardize_by_reference(ctx_memory, ctx_memory)
-    meta_retrieval, _ = standardize_by_reference(meta_memory, meta_memory)
-    return x_retrieval, ctx_retrieval, meta_retrieval
+    return x_retrieval, ctx_retrieval
 
 
 def train_metric_from_config(config: dict[str, Any]) -> dict[str, int | float | str]:
@@ -61,12 +60,16 @@ def train_metric_from_config(config: dict[str, Any]) -> dict[str, int | float | 
     meta_memory = _stack_column(memory, "meta")
 
     standardize_features = bool(retrieval_cfg.get("standardize_features", True))
-    x_retrieval, ctx_retrieval, meta_retrieval = _standardized_memory_features(
+    x_retrieval, ctx_retrieval = _standardized_memory_features(
         x_memory,
         ctx_memory,
-        meta_memory,
         enabled=standardize_features,
     )
+    # Entity ids are nominal: retrieval matches them per field, so raw values are used.
+    meta_retrieval = meta_memory
+
+    horizon = y_memory.shape[1]
+    exclusion_mask = case_overlap_exclusion_mask(memory, memory, horizon_days=horizon)
 
     route_k = int(
         training_cfg.get(
@@ -84,6 +87,7 @@ def train_metric_from_config(config: dict[str, Any]) -> dict[str, int | float | 
         meta_retrieval,
         route_k=route_k,
         exclude_self=True,
+        exclusion_mask=exclusion_mask,
     )
     pairs = build_future_utility_pairs(
         y_memory,
@@ -127,6 +131,7 @@ def train_metric_from_config(config: dict[str, Any]) -> dict[str, int | float | 
     return {
         "memory_cases": int(len(memory)),
         "route_k": int(route_k),
+        "excluded_overlap_pairs": int(exclusion_mask.sum()),
         "pair_count": int(pairs.pair_count),
         "initial_loss": float(loss_history[0]) if len(loss_history) else float("nan"),
         "final_loss": float(loss_history[-1]) if len(loss_history) else float("nan"),

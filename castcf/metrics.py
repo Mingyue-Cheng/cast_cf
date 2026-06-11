@@ -24,18 +24,7 @@ def mse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 def nfd_at_k(y_future: np.ndarray, neighbors: np.ndarray) -> np.ndarray:
     """Neighbor Future Distance for each query case."""
-    y = np.asarray(y_future, dtype=float)
-    nbr = np.asarray(neighbors, dtype=int)
-    if y.ndim != 2 or nbr.ndim != 2:
-        raise ValueError("y_future and neighbors must be 2D arrays")
-    if len(y) != len(nbr):
-        raise ValueError("y_future and neighbors must have the same row count")
-
-    distances = np.empty(nbr.shape[0], dtype=float)
-    for row_id in range(nbr.shape[0]):
-        neighbor_futures = y[nbr[row_id]]
-        distances[row_id] = float(np.mean(np.mean(np.abs(neighbor_futures - y[row_id]), axis=1)))
-    return distances
+    return query_nfd_at_k(y_future, y_future, neighbors)
 
 
 def query_nfd_at_k(
@@ -54,11 +43,8 @@ def query_nfd_at_k(
     if y_query.shape[1] != y_corpus.shape[1]:
         raise ValueError("query and corpus futures must have the same horizon length")
 
-    distances = np.empty(nbr.shape[0], dtype=float)
-    for row_id in range(nbr.shape[0]):
-        neighbor_futures = y_corpus[nbr[row_id]]
-        distances[row_id] = float(np.mean(np.mean(np.abs(neighbor_futures - y_query[row_id]), axis=1)))
-    return distances
+    neighbor_futures = y_corpus[nbr]  # (queries, k, horizon)
+    return np.mean(np.abs(neighbor_futures - y_query[:, None, :]), axis=(1, 2))
 
 
 def subset_metric_table(

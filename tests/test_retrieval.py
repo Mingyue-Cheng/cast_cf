@@ -6,6 +6,7 @@ from castcf.retrieval import (
     castcf_lite_search,
     castcf_multiroute_search,
     cosine_similarity_matrix,
+    meta_match_matrix,
     shape_knn_neighbors,
     shape_knn_search,
 )
@@ -158,6 +159,81 @@ def test_castcf_lite_reranks_shape_candidates_with_context():
     assert castcf_neighbors[0, 0] == 1
 
 
+def test_shape_knn_search_skips_excluded_pairs():
+    query_x = np.array([[1.0, 2.0, 3.0]])
+    corpus_x = np.array([[1.0, 2.0, 3.0], [1.1, 2.1, 3.1], [9.0, 0.0, 0.0]])
+    exclusion_mask = np.array([[True, False, False]])
+
+    neighbors, _ = shape_knn_search(query_x, corpus_x, k=1, exclusion_mask=exclusion_mask)
+
+    assert neighbors.tolist() == [[1]]
+
+
+def test_meta_match_matrix_counts_matching_fields():
+    query_meta = np.array([[1.0, 7.0, 100.0]])
+    corpus_meta = np.array(
+        [
+            [1.0, 7.0, 100.0],
+            [1.0, 7.0, 200.0],
+            [2.0, 8.0, 300.0],
+        ]
+    )
+
+    sims = meta_match_matrix(query_meta, corpus_meta)
+
+    np.testing.assert_allclose(sims, np.array([[1.0, 2.0 / 3.0, 0.0]]))
+
+
+def test_castcf_lite_search_meta_route_prefers_matching_entities():
+    query_x = np.array([[1.0, 2.0, 3.0]])
+    corpus_x = np.array([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]])
+    query_context = np.array([[1.0, 0.0]])
+    corpus_context = np.array([[1.0, 0.0], [1.0, 0.0]])
+    # Numerically close but different ids must not look similar.
+    query_meta = np.array([[100.0, 5.0]])
+    corpus_meta = np.array([[101.0, 6.0], [100.0, 5.0]])
+
+    neighbors, _ = castcf_lite_search(
+        query_x,
+        query_context,
+        query_meta,
+        corpus_x,
+        corpus_context,
+        corpus_meta,
+        k=1,
+        candidate_k=2,
+        shape_weight=0.0,
+        context_weight=0.0,
+        meta_weight=1.0,
+    )
+
+    assert neighbors.tolist() == [[1]]
+
+
+def test_castcf_multiroute_search_respects_exclusion_mask():
+    query_x = np.array([[1.0, 2.0, 3.0]])
+    corpus_x = np.array([[1.0, 2.0, 3.0], [1.1, 2.1, 3.1], [9.0, 0.0, 0.0]])
+    context = np.array([[1.0, 0.0]])
+    corpus_context = np.array([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
+    meta = np.ones((1, 1))
+    corpus_meta = np.ones((3, 1))
+    exclusion_mask = np.array([[True, False, False]])
+
+    neighbors, _ = castcf_multiroute_search(
+        query_x,
+        context,
+        meta,
+        corpus_x,
+        corpus_context,
+        corpus_meta,
+        k=2,
+        route_k=3,
+        exclusion_mask=exclusion_mask,
+    )
+
+    assert 0 not in neighbors[0].tolist()
+
+
 def test_aggregate_neighbor_futures_uses_softmax_scores():
     y_future = np.array(
         [
@@ -174,3 +250,29 @@ def test_aggregate_neighbor_futures_uses_softmax_scores():
     weight_1 = np.exp(2.0) / (np.exp(2.0) + np.exp(0.0))
     weight_2 = 1.0 - weight_1
     np.testing.assert_allclose(pred[0], weight_1 * y_future[1] + weight_2 * y_future[2])
+
+
+def test_aggregate_neighbor_futures_ignores_padded_duplicate_neighbors():
+    y_future = np.array([[0.0, 0.0], [10.0, 20.0], [30.0, 40.0]])
+    neighbors = np.array([[1, 2, 2]])  # index 2 repeated by edge padding
+    scores = np.array([[1.0, 1.0, 1.0]])
+
+    pred = aggregate_neighbor_futures(y_future, neighbors, scores, temperature=1.0)
+
+    np.testing.assert_allclose(pred[0], 0.5 * y_future[1] + 0.5 * y_future[2])
+
+
+def test_aggregate_neighbor_futures_normalize_scores_is_shift_and_scale_invariant():
+    y_future = np.array([[0.0, 0.0], [10.0, 20.0], [30.0, 40.0]])
+    neighbors = np.array([[1, 2]])
+    raw_scores = np.array([[5.0, 3.0]])
+    shifted_scaled = raw_scores * 100.0 + 7.0
+
+    base = aggregate_neighbor_futures(
+        y_future, neighbors, raw_scores, temperature=1.0, normalize_scores=True
+    )
+    transformed = aggregate_neighbor_futures(
+        y_future, neighbors, shifted_scaled, temperature=1.0, normalize_scores=True
+    )
+
+    np.testing.assert_allclose(base, transformed)

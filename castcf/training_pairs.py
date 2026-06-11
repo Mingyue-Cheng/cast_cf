@@ -46,6 +46,11 @@ def build_future_utility_pairs(
     For each query case, the closest candidate future trajectory becomes the
     positive item, and the farthest candidate future trajectory becomes the
     negative item. The query itself is removed when present.
+
+    `candidate_indices` must already exclude same-series cases whose future
+    windows overlap the query's (build them with an exclusion mask, e.g. via
+    `multiroute_candidate_indices(..., exclusion_mask=...)`); otherwise the
+    positive item degenerates to the query's own shifted window.
     """
     y = _as_2d(y_future)
     if min_distance_margin < 0:

@@ -9,6 +9,48 @@
 
 ------
 
+## 0. 当前代码进度与规划状态
+
+更新时间：2026-06-11。
+
+这份文档现在应作为 **CoCast / CastCF 的 code-aligned 规划文档** 使用。相较于最早的方案草案，当前代码已经不只是概念设计，也不只是固定加权的 CastCF-lite baseline；它已经实现了一版 lightweight forecast-aware metric learning。
+
+当前代码已经完成：
+
+1. **FreshRetailNet-50K 数据读取与 case memory 构造。** 默认数据路径为 `FreshRetailNet-50K/data/train.parquet` 和 `FreshRetailNet-50K/data/eval.parquet`，当前 smoke 配置抽样 `max_series=500`，构造 `4000` 个 memory cases 和 `500` 个 query cases。
+2. **检索式预测闭环。** 已支持 `recent`、`shape_knn`、`context_knn`、`castcf_lite`、`castcf_multiroute` 和 `learned_metric`。
+3. **多路候选召回。** `castcf_multiroute` 从 shape、context、meta 三路各取 `route_k=100` 个候选，合并后 rerank，避免只依赖 shape-first candidate pool。
+4. **Forecast-aware pairwise metric learning。** 当前 `learned_metric` 是轻量线性 scorer，不是神经网络 encoder。它基于未来轨迹效用构造正负样本，训练 pairwise ranking loss，并保存 `weights`、`feature_mean`、`feature_scale` 和 `loss_history`。
+5. **基础评估指标。** 已输出 MAE、MSE、NFD@K，以及 `future_discounted`、`future_holiday`、`future_activity`、`past_stockout`、`future_stockout` 等 subset 指标。
+
+当前默认 smoke 结果如下：
+
+| 方法 | MAE | MSE | NFD@K |
+| --- | ---: | ---: | ---: |
+| `recent` | 0.456142 | 0.493747 | - |
+| `shape_knn` | 0.872817 | 3.601460 | 1.044328 |
+| `context_knn` | 0.652710 | 1.694710 | 0.822029 |
+| `castcf_lite` | 0.586405 | 1.362452 | 0.749033 |
+| `castcf_multiroute` | 0.511730 | 1.155460 | 0.660868 |
+| `learned_metric` | 0.439667 | 0.490470 | 0.564674 |
+
+这组结果说明两件事：
+
+1. context 和 meta 参与检索后，NFD@K 明显低于 shape-only retrieval，说明 FreshRetailNet-50K 上确实存在“历史曲线相似不等于未来有用”的信号。
+2. `learned_metric` 已经把“未来预测效用监督相似性”从方案推进到了可运行代码，当前下一步不再是“引入 learned forecast-aware similarity”，而是要把它扩展到更强、更严格的论文级实验。
+
+当前还没有完成：
+
+1. 神经网络 multi-view encoder。
+2. 与 PatchTST、TimesNet、iTransformer、TSMixer 等 strong forecasting backbone 的融合。
+3. base forecast + collaborative residual correction。
+4. retrieval reliability gate。
+5. hard negatives 的系统构造。
+6. full-scale FreshRetailNet、多 seed、多 split、多数据集评测。
+7. counterfactual context test 和 same-past-different-future probe。
+
+因此，当前阶段定位应从 **concept proposal** 更新为 **verified pilot + next-step paper prototype**：核心机制已经有初步代码证据，后续重点是规模化、强 baseline、严格消融和与 backbone 的融合。
+
 ## 1. 核心问题定义：从“相似历史曲线”到“相似情境案例”
 
 可以把每一个历史预测样本定义为一个 forecasting case：
@@ -417,20 +459,78 @@ d_{future}(q,i) = \text{MSE}(Y_q^{future}, Y_i^{future}) + \gamma d_{\text{trend
 
 ------
 
-## 14. 最小可行版本
+## 14. 当前最小可行版本与下一步路线
 
-如果你想快速推进，我建议第一版不要做得太大，先做一个清晰版本：
+根据当前代码进度，最小可行版本不应再从零开始定义。现在应分成三个阶段推进。
 
-基础模型选择 PatchTST 或 iTransformer。
-Memory bank 存储所有训练窗口。
-Encoder 使用同一个 time-series encoder 加一个 context encoder。
-Retrieval 分两阶段：先用 time-series embedding 做粗检索，再用 context-aware similarity 做 reranking。
-训练时加入 pairwise ranking loss。
-预测时用 Top-K 邻居未来轨迹做 residual correction。
-实验主打电力负荷、交通流量、零售销量三个 context-rich 场景。
-额外构造 context-sensitive subset 和 counterfactual context test。
+### 14.1 已完成的 v0：CastCF learned-metric pilot
 
-这个版本已经可以形成一篇完整顶会方法论文。
+当前 v0 已经完成以下闭环：
+
+1. Memory bank 存储 FreshRetailNet-50K 的历史 forecasting cases。
+2. Query 只检索 memory cases，不在 query 集合内互相检索。
+3. shape、context、meta 三路候选召回。
+4. 基于 future utility 的 pairwise ranking supervision。
+5. 线性 learned metric reranker。
+6. Top-K 邻居未来轨迹加权聚合预测。
+7. MAE、MSE、NFD@K 和 subset metrics。
+
+这个版本已经足以作为 pilot evidence：它证明数据、case memory、context retrieval、多路召回和 forecast-aware metric learning 都能跑通，并且 `learned_metric` 已经优于固定加权的 `castcf_multiroute`。
+
+但 v0 不能直接作为最终论文方法，因为它仍然是 numpy 级别轻量原型，没有 neural encoder，没有 strong forecasting backbone，也没有完整 benchmark。
+
+### 14.2 下一步 v1：论文最小方法版本
+
+建议 v1 收束为一个可投稿的最小方法，而不是一次性实现所有设想：
+
+1. 选择一个强但可控的 base forecaster，例如 PatchTST、iTransformer 或 TSMixer。
+2. 保留当前 case memory 和多路候选召回框架。
+3. 将当前 linear learned metric 升级为 multi-view scorer，但先不做过重的生成式或大模型模块。
+4. 把邻居未来轨迹作为 residual correction，而不是只做直接邻居加权：
+
+[
+\hat{Y} = \hat{Y}_{base} + \Delta \hat{Y}_{cf}.
+]
+
+5. 用 pairwise ranking loss 保持 retrieval quality，同时加入 prediction loss：
+
+[
+\mathcal{L} = \mathcal{L}_{pred} + \lambda \mathcal{L}_{rank}.
+]
+
+6. 先实现一个轻量 retrieval reliability gate，只回答一个问题：当前 query 是否应该相信 retrieved evidence。
+
+这个 v1 的主张应是：
+
+> CoCast is a retrieval memory module that improves a base forecaster by learning forecast-useful historical evidence under the current context.
+
+也就是说，v1 不再只是 kNN forecasting，而是 **base forecaster + forecast-aware collaborative retrieval memory**。
+
+### 14.3 v1 的实验优先级
+
+为了让 v1 具备论文说服力，实验应按以下优先级补齐：
+
+1. **扩大 FreshRetailNet 规模。** 从 `max_series=500` 扩到更大规模，至少报告多个规模下的趋势。
+2. **加入 validation split。** 从官方 train 内部切 validation query，用于调 `route_k`、`k`、学习率和 loss 权重，避免反复使用官方 eval。
+3. **多 seed。** 当前 smoke 配置只能说明方向有信号，不能说明稳定性。
+4. **强 baseline。** 至少比较 DLinear、PatchTST、iTransformer 或 TSMixer，再比较 RAFT / shape retrieval / context model。
+5. **核心消融。** 去掉 context、去掉 meta、去掉 learned metric、去掉 ranking loss、不同 `k` 和 `route_k`。
+6. **context-sensitive subset。** 单独报告 discount、activity、holiday、stockout、context shift 等样本。
+7. **same-past-different-future probe。** 直接证明 shape-only retrieval 会失败，而 context-aware learned metric 能换邻居。
+
+### 14.4 v2：完整顶会版本
+
+v2 再考虑更完整的模块：
+
+1. 动态 query-conditioned similarity weights。
+2. hard negatives：shape-similar future-different、context-similar pattern-different、stale negatives。
+3. calibration loss 和 uncertainty output。
+4. 更严格的 retrieval reliability gate。
+5. 多数据集：零售、电力、交通、环境等 context-rich forecasting 场景。
+6. counterfactual context test。
+7. CoCast-Bench 或 Contextual Neighbor Forecasting Benchmark。
+
+换句话说，当前最务实的路线是：**先把已跑通的 learned metric pilot 升级成 backbone-compatible CoCast-v1，再用严格评测证明它不是简单的 kNN + context features。**
 
 ------
 

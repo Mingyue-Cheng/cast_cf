@@ -5,7 +5,13 @@ from pathlib import Path
 
 import numpy as np
 
-from castcf.retrieval import cosine_similarity_matrix, shape_knn_search
+from castcf.retrieval import (
+    _apply_exclusion,
+    _topk_desc,
+    cosine_similarity_matrix,
+    meta_match_matrix,
+    shape_knn_search,
+)
 
 
 def _as_2d(values: np.ndarray, name: str) -> np.ndarray:
@@ -43,7 +49,12 @@ def pair_feature_matrix(
     query_indices: np.ndarray,
     corpus_indices: np.ndarray,
 ) -> np.ndarray:
-    """Construct query-candidate features used by the learned metric scorer."""
+    """Construct query-candidate features used by the learned metric scorer.
+
+    Features are [shape_cos, context_cos, shape_distance, context_distance,
+    one equality indicator per entity-meta column]. Entity ids are nominal, so
+    per-field equality replaces cosine/L1 similarity on raw id values.
+    """
     qx = _as_2d(query_x, "query_x")
     qctx = _as_2d(query_context, "query_context")
     qmeta = _as_2d(query_meta, "query_meta")
@@ -71,19 +82,17 @@ def pair_feature_matrix(
 
     shape_cos = _pair_cosine(qx_rows, cx_rows)
     context_cos = _pair_cosine(qctx_rows, cctx_rows)
-    meta_cos = _pair_cosine(qmeta_rows, cmeta_rows)
     shape_distance = -np.mean(np.abs(qx_rows - cx_rows), axis=1)
     context_distance = -np.mean(np.abs(qctx_rows - cctx_rows), axis=1)
-    meta_distance = -np.mean(np.abs(qmeta_rows - cmeta_rows), axis=1)
+    meta_match = (qmeta_rows == cmeta_rows).astype(float)
 
     return np.column_stack(
         [
             shape_cos,
             context_cos,
-            meta_cos,
             shape_distance,
             context_distance,
-            meta_distance,
+            meta_match,
         ]
     )
 
@@ -198,8 +207,13 @@ def multiroute_candidate_indices(
     corpus_meta: np.ndarray,
     route_k: int,
     exclude_self: bool = False,
+    exclusion_mask: np.ndarray | None = None,
 ) -> list[np.ndarray]:
-    """Return merged shape/context/meta candidate ids for each query."""
+    """Return merged shape/context/meta candidate ids for each query.
+
+    Pass `exclusion_mask` (query x corpus bool) to drop candidates whose future
+    windows can overlap the query's; see `castcf.features.overlap_exclusion_mask`.
+    """
     qx = _as_2d(query_x, "query_x")
     qctx = _as_2d(query_context, "query_context")
     qmeta = _as_2d(query_meta, "query_meta")
@@ -214,10 +228,12 @@ def multiroute_candidate_indices(
         raise ValueError("corpus must contain at least one row")
 
     k_eff = min(route_k, len(cx))
-    shape_candidates, _ = shape_knn_search(qx, cx, k=k_eff)
-    context_candidates, _ = shape_knn_search(qctx, cctx, k=k_eff)
-    meta_candidates, _ = shape_knn_search(qmeta, cmeta, k=k_eff)
+    shape_candidates, _ = shape_knn_search(qx, cx, k=k_eff, exclusion_mask=exclusion_mask)
+    context_candidates, _ = shape_knn_search(qctx, cctx, k=k_eff, exclusion_mask=exclusion_mask)
+    meta_sims = _apply_exclusion(meta_match_matrix(qmeta, cmeta), exclusion_mask)
+    meta_candidates, _ = _topk_desc(meta_sims, k_eff)
 
+    mask = None if exclusion_mask is None else np.asarray(exclusion_mask, dtype=bool)
     candidate_lists: list[np.ndarray] = []
     for query_id in range(len(qx)):
         merged = np.unique(
@@ -231,6 +247,8 @@ def multiroute_candidate_indices(
         )
         if exclude_self and len(qx) == len(cx):
             merged = merged[merged != query_id]
+        if mask is not None:
+            merged = merged[~mask[query_id, merged]]
         candidate_lists.append(merged.astype(int, copy=False))
     return candidate_lists
 
@@ -245,6 +263,7 @@ def learned_metric_search(
     scorer: LearnedMetricScorer,
     k: int,
     route_k: int,
+    exclusion_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Retrieve corpus cases with the learned forecast-aware metric scorer."""
     qx = _as_2d(query_x, "query_x")
@@ -260,6 +279,7 @@ def learned_metric_search(
         corpus_context,
         corpus_meta,
         route_k=max(route_k, output_k),
+        exclusion_mask=exclusion_mask,
     )
 
     neighbors = np.empty((len(qx), output_k), dtype=int)
@@ -267,6 +287,8 @@ def learned_metric_search(
     for query_id, candidates in enumerate(candidates_by_query):
         if len(candidates) == 0:
             fallback_scores = cosine_similarity_matrix(qx[[query_id]], cx).ravel()
+            if exclusion_mask is not None:
+                fallback_scores[np.asarray(exclusion_mask, dtype=bool)[query_id]] = -np.inf
             order = np.argsort(-fallback_scores)[:output_k]
             selected = order
             selected_scores = fallback_scores[selected]

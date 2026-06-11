@@ -18,7 +18,7 @@ retrieval:
   k: 10
   candidate_k: 100
   route_k: 100
-  temperature: 0.2
+  temperature: 0.5
   standardize_features: true
   shape_weight: 0.35
   context_weight: 0.55

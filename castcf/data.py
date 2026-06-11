@@ -6,6 +6,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from castcf.features import overlap_exclusion_mask
+
 
 ENTITY_COLUMNS = [
     "city_id",
@@ -136,10 +138,13 @@ def build_daily_cases(
         total = len(group)
         if total < lookback_days + horizon_days:
             continue
+        entity_rows = group[ENTITY_COLUMNS].drop_duplicates()
+        if len(entity_rows) != 1:
+            raise ValueError(f"Entity columns vary within series {series_id}")
+        meta = entity_rows.iloc[0].to_numpy(dtype=np.int64)
         for future_start in range(lookback_days, total - horizon_days + 1, stride_days):
             past = group.iloc[future_start - lookback_days : future_start]
             future = group.iloc[future_start : future_start + horizon_days]
-            meta = group.iloc[0][ENTITY_COLUMNS].to_numpy(dtype=np.int64)
             stockout_future = pd.to_numeric(future["stock_hour6_22_cnt"], errors="coerce").fillna(0)
             hours_sale_mean = _list_mean(future["hours_sale"]) if "hours_sale" in future.columns else 0.0
             case_rows.append(
@@ -162,6 +167,43 @@ def build_daily_cases(
             )
 
     return pd.DataFrame(case_rows)
+
+
+def case_overlap_exclusion_mask(
+    query_cases: pd.DataFrame,
+    corpus_cases: pd.DataFrame,
+    horizon_days: int,
+) -> np.ndarray:
+    """Build a query-corpus exclusion mask from case frames.
+
+    Marks corpus cases whose `y_future` window can share days with the query's
+    (same `series_id`, anchors closer than `horizon_days`), so retrieval and
+    pair supervision never see a candidate that contains the query's own future.
+    """
+    for frame, name in ((query_cases, "query_cases"), (corpus_cases, "corpus_cases")):
+        missing = {"series_id", "anchor_dt"}.difference(frame.columns)
+        if missing:
+            raise ValueError(f"{name} is missing required columns: {sorted(missing)}")
+
+    combined_series = pd.concat(
+        [query_cases["series_id"], corpus_cases["series_id"]], ignore_index=True
+    )
+    codes, _ = pd.factorize(combined_series)
+    query_codes = codes[: len(query_cases)]
+    corpus_codes = codes[len(query_cases) :]
+
+    def _anchor_days(frame: pd.DataFrame) -> np.ndarray:
+        return (
+            pd.to_datetime(frame["anchor_dt"]).to_numpy(dtype="datetime64[D]").astype(np.int64)
+        )
+
+    return overlap_exclusion_mask(
+        query_codes,
+        _anchor_days(query_cases),
+        corpus_codes,
+        _anchor_days(corpus_cases),
+        min_anchor_gap=horizon_days,
+    )
 
 
 def save_cases(cases: pd.DataFrame, output_path: str | Path) -> Path:

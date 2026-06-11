@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from castcf.data import case_overlap_exclusion_mask
 from castcf.features import standardize_by_reference
 from castcf.learned_metric import LearnedMetricScorer, learned_metric_search
 from castcf.metrics import query_nfd_at_k, subset_metric_table
@@ -51,8 +52,9 @@ def _context_knn_search(
     query_context: np.ndarray,
     corpus_context: np.ndarray,
     k: int,
+    exclusion_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    return shape_knn_search(query_context, corpus_context, k=k)
+    return shape_knn_search(query_context, corpus_context, k=k, exclusion_mask=exclusion_mask)
 
 
 def _method_report(
@@ -103,11 +105,14 @@ def run_baselines_from_config(config: dict[str, Any]) -> dict[str, int | str]:
     if standardize_features:
         x_query_retrieval, x_memory_retrieval = standardize_by_reference(x_query, x_memory)
         ctx_query_retrieval, ctx_memory_retrieval = standardize_by_reference(ctx_query, ctx_memory)
-        meta_query_retrieval, meta_memory_retrieval = standardize_by_reference(meta_query, meta_memory)
     else:
         x_query_retrieval, x_memory_retrieval = x_query, x_memory
         ctx_query_retrieval, ctx_memory_retrieval = ctx_query, ctx_memory
-        meta_query_retrieval, meta_memory_retrieval = meta_query, meta_memory
+    # Entity ids are nominal: retrieval matches them per field, so raw values are used.
+    meta_query_retrieval, meta_memory_retrieval = meta_query, meta_memory
+
+    horizon = y_query.shape[1]
+    exclusion_mask = case_overlap_exclusion_mask(query, memory, horizon_days=horizon)
 
     k = int(retrieval_cfg["k"])
     candidate_k = int(retrieval_cfg.get("candidate_k", max(k, 20)))
@@ -117,10 +122,14 @@ def run_baselines_from_config(config: dict[str, Any]) -> dict[str, int | str]:
 
     recent_pred = _recent_forecast(x_query, horizon=y_query.shape[1])
 
-    shape_neighbors, shape_scores = shape_knn_search(x_query_retrieval, x_memory_retrieval, k=k)
+    shape_neighbors, shape_scores = shape_knn_search(
+        x_query_retrieval, x_memory_retrieval, k=k, exclusion_mask=exclusion_mask
+    )
     shape_pred = aggregate_neighbor_futures(y_memory, shape_neighbors, shape_scores, temperature=temperature)
 
-    context_neighbors, context_scores = _context_knn_search(ctx_query_retrieval, ctx_memory_retrieval, k=k)
+    context_neighbors, context_scores = _context_knn_search(
+        ctx_query_retrieval, ctx_memory_retrieval, k=k, exclusion_mask=exclusion_mask
+    )
     context_pred = aggregate_neighbor_futures(y_memory, context_neighbors, context_scores, temperature=temperature)
 
     castcf_neighbors, castcf_scores = castcf_lite_search(
@@ -135,6 +144,7 @@ def run_baselines_from_config(config: dict[str, Any]) -> dict[str, int | str]:
         shape_weight=float(retrieval_cfg.get("shape_weight", 0.4)),
         context_weight=float(retrieval_cfg.get("context_weight", 0.5)),
         meta_weight=float(retrieval_cfg.get("meta_weight", 0.1)),
+        exclusion_mask=exclusion_mask,
     )
     castcf_pred = aggregate_neighbor_futures(y_memory, castcf_neighbors, castcf_scores, temperature=temperature)
 
@@ -150,6 +160,7 @@ def run_baselines_from_config(config: dict[str, Any]) -> dict[str, int | str]:
         shape_weight=float(retrieval_cfg.get("shape_weight", 0.4)),
         context_weight=float(retrieval_cfg.get("context_weight", 0.5)),
         meta_weight=float(retrieval_cfg.get("meta_weight", 0.1)),
+        exclusion_mask=exclusion_mask,
     )
     multiroute_pred = aggregate_neighbor_futures(
         y_memory,
@@ -186,12 +197,18 @@ def run_baselines_from_config(config: dict[str, Any]) -> dict[str, int | str]:
             learned_scorer,
             k=k,
             route_k=route_k,
+            exclusion_mask=exclusion_mask,
         )
+        # Learned-metric scores are unbounded; normalize_learned_scores=true
+        # standardizes them per row so `temperature` transfers across methods,
+        # at the cost of needing its own temperature tuning (see README ablation).
+        normalize_learned_scores = bool(retrieval_cfg.get("normalize_learned_scores", False))
         learned_pred = aggregate_neighbor_futures(
             y_memory,
             learned_neighbors,
             learned_scores,
             temperature=temperature,
+            normalize_scores=normalize_learned_scores,
         )
         method_reports["learned_metric"] = _method_report(
             query,
@@ -212,6 +229,10 @@ def run_baselines_from_config(config: dict[str, Any]) -> dict[str, int | str]:
             "route_k": route_k,
             "temperature": temperature,
             "standardize_features": standardize_features,
+            "leakage_guard": {
+                "min_anchor_gap_days": int(horizon),
+                "excluded_query_memory_pairs": int(exclusion_mask.sum()),
+            },
             "shape_weight": float(retrieval_cfg.get("shape_weight", 0.4)),
             "context_weight": float(retrieval_cfg.get("context_weight", 0.5)),
             "meta_weight": float(retrieval_cfg.get("meta_weight", 0.1)),
